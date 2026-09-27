@@ -1,0 +1,502 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
+import { apiClient } from "../api/client";
+import { useAuth } from "../context/AuthContext";
+import StatusBadge from "../components/StatusBadge";
+import { ROLES } from "../constants/rbac";
+import { isGoalSettingPeriodActive, formatDateDisplay } from "../utils/periodVisibility";
+
+const Goals = () => {
+  const { user, activeCycle } = useAuth();
+  const location = useLocation();
+  const [goals, setGoals] = useState([]);
+  const [form, setForm] = useState({ year: activeCycle?.year || new Date().getFullYear(), goalTitle: "", goalDescription: "", weightage: "" });
+  const [editingId, setEditingId] = useState(null);
+  const [error, setError] = useState("");
+  const [focusedGoalId, setFocusedGoalId] = useState("");
+  const [returningGoalId, setReturningGoalId] = useState(null);
+  const [returnRemark, setReturnRemark] = useState("");
+  const [isGoalPeriodActive, setIsGoalPeriodActive] = useState(false);
+  const goalRowRefs = useRef(new Map());
+  const activeRole = user?.selectedRole || user?.role;
+  const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
+  const selectedEmployeeId = searchParams.get("employeeId") || "";
+  const selectedEmployeeName = searchParams.get("employeeName") || "";
+
+  useEffect(() => {
+    setIsGoalPeriodActive(isGoalSettingPeriodActive(activeCycle));
+  }, [activeCycle]);
+
+  const loadGoals = async () => {
+    try {
+      if (activeRole === ROLES.EMPLOYEE) {
+        const response = await apiClient.get("/goals/my");
+        setGoals(response.data);
+      } else if (activeRole === ROLES.REPORTING_OFFICER) {
+        if (selectedEmployeeId) {
+          const response = await apiClient.get(`/goals/ro/employee/${encodeURIComponent(selectedEmployeeId)}`);
+          setGoals(response.data);
+        } else {
+          const response = await apiClient.get("/goals/pending/ro");
+          setGoals(response.data);
+        }
+      } else if (activeRole === ROLES.REVIEWING_OFFICER) {
+        const response = await apiClient.get(
+          selectedEmployeeId
+            ? `/goals/pending/review?employeeId=${encodeURIComponent(selectedEmployeeId)}`
+            : "/goals/pending/review"
+        );
+        setGoals(response.data);
+      } else if (activeRole === ROLES.ACCEPTING_OFFICER) {
+        const response = await apiClient.get(
+          selectedEmployeeId
+            ? `/goals/pending/ao?employeeId=${encodeURIComponent(selectedEmployeeId)}`
+            : "/goals/pending/ao"
+        );
+        setGoals(response.data);
+      } else {
+        const response = await apiClient.get("/goals/all");
+        setGoals(response.data);
+      }
+    } catch (err) {
+      setGoals([]);
+    }
+  };
+
+  useEffect(() => {
+    if (user) loadGoals();
+  }, [user, activeRole, selectedEmployeeId]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const nextFocusedGoalId = params.get("focus") || "";
+    setFocusedGoalId(nextFocusedGoalId);
+  }, [location.search]);
+
+  useEffect(() => {
+    if (!focusedGoalId) return;
+    const row = goalRowRefs.current.get(String(focusedGoalId));
+    if (row) {
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+      row.classList.add("pulse-highlight");
+      const timer = window.setTimeout(() => row.classList.remove("pulse-highlight"), 1800);
+      return () => window.clearTimeout(timer);
+    }
+    return undefined;
+  }, [focusedGoalId, goals]);
+
+  const cycleTotals = useMemo(() => {
+    const map = new Map();
+    goals.forEach((goal) => {
+      const key = goal.cycleId || goal.cycle?.id || "unknown";
+      map.set(key, Number(map.get(key) || 0) + Number(goal.weightage || 0));
+    });
+    return map;
+  }, [goals]);
+
+  // Get the total weightage of ALL goals for the currently selected cycle year
+  const totalCycleWeightage = useMemo(() => {
+    const selectedYear = Number(form.year);
+    return goals
+      .filter((g) => {
+        const goalYear = Number(g.cycle?.year || g.year || 0);
+        return goalYear === selectedYear || !goalYear; // Include goals with no year if they are in the list
+      })
+      .reduce((sum, g) => sum + Number(g.weightage || 0), 0);
+  }, [goals, form.year]);
+
+  // Get the total of all draft and returned goals (unsubmitted goals) - used for showing/hiding form
+  const draftGoalsTotal = useMemo(() => {
+    return goals
+      .filter((g) => ["draft", "returned"].includes(g.status))
+      .reduce((sum, g) => sum + Number(g.weightage || 0), 0);
+  }, [goals]);
+
+  // Check if there are any unsubmitted goals
+  const hasUnsubmittedGoals = useMemo(() => {
+    return goals.some((g) => ["draft", "returned"].includes(g.status));
+  }, [goals]);
+
+  const isWeightageComplete = Math.abs(totalCycleWeightage - 100) < 0.01; // Allow for floating point errors
+  const progressPercentage = Math.min((totalCycleWeightage / 100) * 100, 100);
+
+  const shouldShowGoalForm =
+    activeRole === ROLES.EMPLOYEE &&
+    isGoalPeriodActive &&
+    (goals.length === 0 || hasUnsubmittedGoals || !isWeightageComplete);
+
+  const groupedByDept = useMemo(() => {
+    const depts = new Map();
+
+    goals.forEach((goal) => {
+      const deptName = goal.employee?.department || "Main Department";
+      const employeeId = goal.employee?.id ?? `self-${goal.cycleId || "unknown"}`;
+
+      if (!depts.has(deptName)) {
+        depts.set(deptName, { name: deptName, employees: new Map() });
+      }
+
+      const deptGroup = depts.get(deptName);
+      if (!deptGroup.employees.has(employeeId)) {
+        deptGroup.employees.set(employeeId, {
+          id: employeeId,
+          name: goal.employee?.name || "Self",
+          items: []
+        });
+      }
+
+      deptGroup.employees.get(employeeId).items.push(goal);
+    });
+
+    // Convert Map to sorted array for rendering
+    return Array.from(depts.values())
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map(dept => ({
+        ...dept,
+        employees: Array.from(dept.employees.values())
+      }));
+  }, [goals]);
+
+  const handleSave = async () => {
+    setError("");
+    const weightage = Number(form.weightage);
+    if (Number.isFinite(weightage) && weightage > 100) {
+      setError("Weightage must be less than or equal to 100");
+      return;
+    }
+    try {
+      const payload = {
+        year: Number(form.year),
+        goalTitle: form.goalTitle,
+        goalDescription: form.goalDescription,
+        weightage
+      };
+      if (editingId) {
+        await apiClient.put(`/goals/goal/${editingId}`, payload);
+      } else {
+        await apiClient.post("/goals", payload);
+      }
+      setEditingId(null);
+      setForm({ year: activeCycle?.year || new Date().getFullYear(), goalTitle: "", goalDescription: "", weightage: "" });
+      loadGoals();
+    } catch (err) {
+      setError(err.response?.data?.error || err.response?.data?.message || "Unable to save goal");
+    }
+  };
+
+  const handleSubmitGoals = async (year) => {
+    setError("");
+    try {
+      await apiClient.post("/goals/submit", { year });
+      loadGoals();
+    } catch (err) {
+      setError(err.response?.data?.error || err.response?.data?.message || "Unable to submit goals");
+    }
+  };
+
+  const handleEdit = (goal) => {
+    setEditingId(goal.id);
+    setForm({
+      year: goal.cycle?.year || new Date().getFullYear(),
+      goalTitle: goal.goalTitle,
+      goalDescription: goal.goalDescription || "",
+      weightage: String(goal.weightage || "")
+    });
+  };
+
+  const handleDelete = async (goalId) => {
+    if (!window.confirm("Are you sure you want to delete this goal? This action cannot be undone.")) {
+      return;
+    }
+    setError("");
+    try {
+      await apiClient.delete(`/goals/${goalId}`);
+      loadGoals();
+    } catch (err) {
+      setError(err.response?.data?.error || err.response?.data?.message || "Unable to delete goal");
+    }
+  };
+
+  const handleApprove = async (goalId, type, decision = "approve", remarks = "") => {
+    try {
+      await apiClient.post(`/goals/${goalId}/approve/${type}`, { decision, remarks });
+      loadGoals();
+      setReturningGoalId(null);
+      setReturnRemark("");
+    } catch (err) {
+      setError(err.response?.data?.error || err.response?.data?.message || "Unable to process goal action");
+    }
+  };
+
+  const showGroupedByEmployee = activeRole === ROLES.REPORTING_OFFICER || activeRole === ROLES.REVIEWING_OFFICER;
+  const canTakeGoalAction = activeRole === ROLES.REPORTING_OFFICER || activeRole === ROLES.REVIEWING_OFFICER;
+
+  return (
+    <div className="page-content">
+      {activeRole === ROLES.EMPLOYEE && !isGoalPeriodActive && (
+        <div className="card" style={{ borderLeft: "4px solid #ff9800" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+            <div style={{ fontSize: "24px" }}>⏰</div>
+            <div>
+              <div style={{ fontWeight: 600, marginBottom: "4px" }}>Goal Setting Period Not Active</div>
+              <div style={{ color: "#666", fontSize: "14px" }}>
+                You can create and edit goals only during the goal setting period.
+                {activeCycle?.goalSettingStart && (
+                  <>
+                    <br />
+                    <strong>Period:</strong> {formatDateDisplay(activeCycle.goalSettingStart)} to {formatDateDisplay(activeCycle.goalSettingEnd)}
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {shouldShowGoalForm && (
+        <div className="card">
+          <div className="card-header">
+            <h2>{editingId ? "Edit Goal" : "Create Goal"}</h2>
+          </div>
+          <div className="form-grid">
+            <div className="form-row">
+              <div>
+                <label>Cycle Year</label>
+                <input type="number" value={form.year} onChange={(e) => setForm({ ...form, year: e.target.value })} />
+              </div>
+              <div>
+                <label>Weightage</label>
+                <input type="number" min={0} max={100} step="0.01" value={form.weightage} onChange={(e) => setForm({ ...form, weightage: e.target.value })} />
+              </div>
+            </div>
+            <div>
+              <label>Goal Title</label>
+              <input value={form.goalTitle} onChange={(e) => setForm({ ...form, goalTitle: e.target.value })} />
+            </div>
+            <div>
+              <label>Goal Description (KPI)</label>
+              <textarea rows={4} value={form.goalDescription} onChange={(e) => setForm({ ...form, goalDescription: e.target.value })} />
+            </div>
+            {error && <div className="error-text">{error}</div>}
+            <div className="action-row">
+              <button className="btn" type="button" onClick={handleSave}>
+                {editingId ? "Update" : "Save Draft"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="card">
+        <div className="card-header">
+          <h2>Goals</h2>
+          <span className="muted">{goals.length} record{goals.length !== 1 ? "s" : ""}</span>
+        </div>
+        {activeRole !== ROLES.EMPLOYEE && selectedEmployeeId && (
+          <div className="muted" style={{ marginBottom: 12 }}>
+            Showing goals for <strong>{selectedEmployeeName || "selected employee"}</strong>
+          </div>
+        )}
+        <table className="table">
+          <thead>
+            <tr>
+              {!showGroupedByEmployee && <th>Employee</th>}
+              <th>Cycle</th>
+              <th>Goal</th>
+              <th>Weightage</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {goals.length === 0 && (
+              <tr><td colSpan={showGroupedByEmployee ? 5 : 6} className="table-empty">No goals found.</td></tr>
+            )}
+            {showGroupedByEmployee
+              ? groupedByDept.map((dept) => (
+                <React.Fragment key={dept.name}>
+                  <tr>
+                    <td colSpan={5} style={{ 
+                      background: "#f1f5f9", 
+                      padding: "10px 16px", 
+                      fontWeight: "700", 
+                      color: "#475569", 
+                      fontSize: "13px", 
+                      textTransform: "uppercase", 
+                      letterSpacing: "0.025em" 
+                    }}>
+                      🏢 {dept.name}
+                    </td>
+                  </tr>
+                  {dept.employees.map((emp) => (
+                    <React.Fragment key={emp.id}>
+                      <tr>
+                        <td colSpan={5} style={{ fontWeight: 700, background: "#f8fafc", color: "#1f2937", paddingLeft: "32px" }}>
+                          👤 {emp.name}
+                        </td>
+                      </tr>
+                      {emp.items.map((goal) => (
+                        <tr
+                          key={goal.id}
+                          ref={(node) => {
+                            if (node) {
+                              goalRowRefs.current.set(String(goal.id), node);
+                            } else {
+                              goalRowRefs.current.delete(String(goal.id));
+                            }
+                          }}
+                          className={String(focusedGoalId) === String(goal.id) ? "row-highlight" : ""}
+                        >
+                          <td>{goal.cycle?.name || goal.cycle?.year || "-"}</td>
+                          <td>
+                            <div>{goal.goalTitle}</div>
+                            <div className="muted" style={{ fontSize: "12px", marginTop: 4 }}>
+                              KPI: {goal.goalDescription || "-"}
+                            </div>
+                            {goal.status === "returned" && goal.returnReason && (
+                              <div style={{ marginTop: "8px", padding: "8px", backgroundColor: "#fff4e5", borderLeft: "4px solid #ff9800", fontSize: "12px", color: "#663c00", borderRadius: "4px" }}>
+                                <strong style={{ display: "block", marginBottom: "4px" }}>Returned by {goal.returnRole === "reporting_officer" ? "Reporting Officer" : "Reviewing Officer"}:</strong>
+                                {goal.returnReason}
+                              </div>
+                            )}
+                          </td>
+                          <td>{Number(goal.weightage).toFixed(2)}</td>
+                          <td><StatusBadge status={goal.status} /></td>
+                          <td>
+                            {canTakeGoalAction && (
+                              <div className="table-actions" style={{ display: "flex", flexDirection: "column", gap: "8px", alignItems: "flex-end" }}>
+                                {activeRole === ROLES.REPORTING_OFFICER && goal.status === "submitted" && (
+                                  returningGoalId === goal.id ? (
+                                    <div style={{ display: "flex", gap: "8px", width: "100%", maxWidth: "300px" }}>
+                                      <input type="text" className="input" placeholder="Reason for return..." value={returnRemark} onChange={(e) => setReturnRemark(e.target.value)} style={{ flex: 1, padding: "6px" }} />
+                                      <button className="btn" type="button" style={{ padding: "6px 12px" }} onClick={() => handleApprove(goal.id, "ro", "return", returnRemark)}>Confirm</button>
+                                      <button className="btn ghost" type="button" style={{ padding: "6px 12px" }} onClick={() => { setReturningGoalId(null); setReturnRemark(""); }}>Cancel</button>
+                                    </div>
+                                  ) : (
+                                    <div style={{ display: "flex", gap: "8px" }}>
+                                      <button className="btn" type="button" onClick={() => handleApprove(goal.id, "ro", "approve")}>Approve</button>
+                                      <button className="btn ghost" type="button" onClick={() => { setReturningGoalId(goal.id); setReturnRemark(""); }}>Return</button>
+                                    </div>
+                                  )
+                                )}
+                                {activeRole === ROLES.REVIEWING_OFFICER && goal.status === "ro_approved" && (
+                                  returningGoalId === goal.id ? (
+                                    <div style={{ display: "flex", gap: "8px", width: "100%", maxWidth: "300px" }}>
+                                      <input type="text" className="input" placeholder="Reason for return..." value={returnRemark} onChange={(e) => setReturnRemark(e.target.value)} style={{ flex: 1, padding: "6px" }} />
+                                      <button className="btn" type="button" style={{ padding: "6px 12px" }} onClick={() => handleApprove(goal.id, "review", "return", returnRemark)}>Confirm</button>
+                                      <button className="btn ghost" type="button" style={{ padding: "6px 12px" }} onClick={() => { setReturningGoalId(null); setReturnRemark(""); }}>Cancel</button>
+                                    </div>
+                                  ) : (
+                                    <div style={{ display: "flex", gap: "8px" }}>
+                                      <button className="btn" type="button" onClick={() => handleApprove(goal.id, "review", "approve")}>Approve</button>
+                                      <button className="btn ghost" type="button" onClick={() => { setReturningGoalId(goal.id); setReturnRemark(""); }}>Return</button>
+                                    </div>
+                                  )
+                                )}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </React.Fragment>
+                  ))}
+                </React.Fragment>
+              ))
+              : goals.map((goal) => (
+                <tr
+                  key={goal.id}
+                  ref={(node) => {
+                    if (node) {
+                      goalRowRefs.current.set(String(goal.id), node);
+                    } else {
+                      goalRowRefs.current.delete(String(goal.id));
+                    }
+                  }}
+                  className={String(focusedGoalId) === String(goal.id) ? "row-highlight" : ""}
+                >
+                  <td>{goal.employee?.name || "Self"}</td>
+                  <td>{goal.cycle?.name || goal.cycle?.year || "-"}</td>
+                  <td>
+                    <div>{goal.goalTitle}</div>
+                    <div className="muted" style={{ fontSize: "12px", marginTop: 4 }}>
+                      KPI: {goal.goalDescription || "-"}
+                    </div>
+                    {goal.status === "returned" && goal.returnReason && (
+                      <div style={{ marginTop: "8px", padding: "8px", backgroundColor: "#fff4e5", borderLeft: "4px solid #ff9800", fontSize: "12px", color: "#663c00", borderRadius: "4px" }}>
+                        <strong style={{ display: "block", marginBottom: "4px" }}>Returned by {goal.returnRole === "reporting_officer" ? "Reporting Officer" : "Reviewing Officer"}:</strong>
+                        {goal.returnReason}
+                      </div>
+                    )}
+                  </td>
+                  <td>{Number(goal.weightage).toFixed(2)}</td>
+                  <td><StatusBadge status={goal.status} /></td>
+                  <td>
+                    <div className="table-actions">
+                      {activeRole === ROLES.EMPLOYEE && ["draft", "returned"].includes(goal.status) && (
+                        <>
+                          <button className="btn ghost" type="button" onClick={() => handleEdit(goal)}>Edit</button>
+                          <button className="btn ghost" type="button" style={{ color: "#f44336" }} onClick={() => handleDelete(goal.id)}>Remove</button>
+                        </>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+          </tbody>
+        </table>
+        {activeRole === ROLES.EMPLOYEE && hasUnsubmittedGoals && (
+          <div style={{ paddingTop: 20, borderTop: "1px solid #e0e0e0" }}>
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <span className="muted">Goal Weightage Progress</span>
+                <span style={{ fontWeight: 600, color: isWeightageComplete ? "#4CAF50" : "#f44336" }}>
+                  {totalCycleWeightage.toFixed(2)} / 100.00
+                </span>
+              </div>
+              <div style={{
+                width: "100%",
+                height: 8,
+                backgroundColor: "#f0f0f0",
+                borderRadius: 4,
+                overflow: "hidden"
+              }}>
+                <div style={{
+                  width: `${progressPercentage}%`,
+                  height: "100%",
+                  backgroundColor: isWeightageComplete ? "#4CAF50" : "#2196F3",
+                  transition: "width 0.3s ease"
+                }} />
+              </div>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
+              <div>
+                {!isWeightageComplete && (
+                  <div className="error-text" style={{ fontSize: "0.9em", margin: 0 }}>
+                    Total must equal 100.00 to submit (currently {totalCycleWeightage.toFixed(2)})
+                  </div>
+                )}
+                {isWeightageComplete && (
+                  <div style={{ color: "#4CAF50", fontSize: "0.9em", margin: 0, fontWeight: 500 }}>
+                    ✓ All goals ready to submit
+                  </div>
+                )}
+              </div>
+              <button
+                className="btn"
+                type="button"
+                disabled={!isWeightageComplete}
+                onClick={() => handleSubmitGoals(Number(form.year))}
+                title={isWeightageComplete ? "Submit all goals" : "Total weightage must equal 100.00 to submit"}
+              >
+                Submit Cycle Goals
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default Goals;

@@ -1,0 +1,86 @@
+:root {
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  color: #1f2937;
+  background-color: #f5f7fb;
+
+  /* Brand */
+  --navy: #1a2a52;
+  --navy-dark: #0f1a3a;
+  --navy-mid: #243566;
+  --accent: #2b5fbf;
+  --accent-hover: #1e4fa3;
+  --accent-light: #eef2fb;
+
+  /* Greys */
+  --grey-50: #f9fafb;
+  --grey-100: #f5f7fb;
+  --grey-200: #e5e7eb;
+  --grey-300: #cbd5e1;
+  --grey-400: #94a3b8;
+  --grey-600: #4b5563;
+  --grey-800: #1f2937;
+
+  --white: #ffffff;
+
+  /* Semantic */
+  --success: #16a34a;
+  --success-bg: #f0fdf4;
+  --warning: #c05621;
+  --warning-bg: #fff7ed;
+  --danger: #b91c1c;
+  --danger-bg: #fef2f2;
+
+  /* Shadows */
+  --shadow-sm: 0 2px 8px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 8px 24px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 16px 48px rgba(15, 23, 42, 0.12);
+
+  /* Radii */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-full: 999px;
+}
+
+/* Responsive baseline: fluid typography and no horizontal overflow */
+html {
+  font-size: clamp(14px, 0.3vw + 13px, 16px);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--grey-100);
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  overflow-x: hidden;
+}
+
+/* Media should never overflow viewport width */
+img,
+video,
+canvas {
+  max-width: 100%;
+  height: auto;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+.page-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  font-size: 16px;
+  color: var(--grey-600);
+}
